@@ -1,9 +1,16 @@
 #!/sbin/openrc-run
 
-command="/root/bin/pia-wg.sh"
+# Resolve the directory where net.pia lives (follows symlinks via realpath).
+# pia-watchdog.sh is expected in the same directory.
+PIA_SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
+command="$PIA_SCRIPT_DIR/pia-wg.sh"
 
 : "${CONFIGDIR:=/var/cache/pia-wg}"
 : "${CONFIG:=/etc/pia-wg/pia-wg.conf}"
+
+WATCHDOG="$PIA_SCRIPT_DIR/pia-watchdog.sh"
+WATCHDOG_PIDFILE="/run/pia-watchdog.pid"
 
 extra_started_commands="reload"
 
@@ -41,8 +48,34 @@ doconn() {
 	return 0
 }
 
+start_watchdog() {
+	if [ -x "$WATCHDOG" ]; then
+		# Pass CONFIG and CONFIGDIR so the watchdog sources the same
+		# pia-config.sh and sees the same PIA_INTERFACE value.
+		start-stop-daemon --start --background --make-pidfile \
+			--pidfile "$WATCHDOG_PIDFILE" \
+			--env CONFIG="$CONFIG" \
+			--env CONFIGDIR="$CONFIGDIR" \
+			--exec "$WATCHDOG"
+		einfo "Watchdog started (PID $(cat "$WATCHDOG_PIDFILE" 2>/dev/null))"
+	else
+		ewarn "pia-watchdog.sh not found or not executable at $WATCHDOG"
+		ewarn "VPN will not be monitored for disconnects"
+	fi
+}
+
+stop_watchdog() {
+	if [ -f "$WATCHDOG_PIDFILE" ]; then
+		start-stop-daemon --stop --pidfile "$WATCHDOG_PIDFILE" \
+			--signal TERM --retry 5 --quiet
+		rm -f "$WATCHDOG_PIDFILE"
+		einfo "Watchdog stopped"
+	fi
+}
+
 start() {
 	doconn -f
+	start_watchdog
 }
 
 reload() {
@@ -55,8 +88,38 @@ restart() {
 }
 
 stop() {
+	# Stop watchdog first so it doesn't try to reconnect while we
+	# are tearing down the tunnel.
+	stop_watchdog
 	(
 		source "$CONFIG"
 		ip link del "${PIA_INTERFACE:-pia}"
 	);
+}
+
+status() {
+	# VPN tunnel status
+	source "$CONFIG" 2>/dev/null
+	local iface="${PIA_INTERFACE:-pia}"
+	if ip link show "$iface" >/dev/null 2>&1; then
+		einfo "VPN tunnel: UP (interface $iface)"
+	else
+		einfo "VPN tunnel: DOWN"
+	fi
+
+	# Watchdog status
+	if [ -f "$WATCHDOG_PIDFILE" ] && kill -0 "$(cat "$WATCHDOG_PIDFILE")" 2>/dev/null; then
+		einfo "Watchdog:    RUNNING (PID $(cat "$WATCHDOG_PIDFILE"))"
+	else
+		einfo "Watchdog:    STOPPED"
+	fi
+
+	# Recent watchdog events
+	if [ -r /var/log/pia-watchdog.log ]; then
+		einfo ""
+		einfo "Recent watchdog events:"
+		tail -5 /var/log/pia-watchdog.log 2>/dev/null | while IFS= read -r line; do
+			einfo "  $line"
+		done
+	fi
 }
