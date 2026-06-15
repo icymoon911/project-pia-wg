@@ -112,6 +112,12 @@ fi
 
 source "$PIA_CONFIG"
 
+# Clean up temporary files on exit (handles normal exit, Ctrl+C, and kill)
+cleanup_temp_files() {
+	rm -f "$CONFIGDIR"/*.temp
+}
+trap cleanup_temp_files EXIT INT TERM
+
 if ! [ -r "$CONFIG" ]
 then
 	echo "Cannot read '$CONFIG', generating a default one"
@@ -155,10 +161,14 @@ ENDCONFIG
 fi
 
 # fetch data-new.json if missing
+PIA_SERVERLIST_URL='https://serverlist.piaservers.net/vpninfo/servers/v6'
 if ! [ -r "$DATAFILE_NEW" ]
 then
 	echo "Fetching new generation server list from PIA"
-	curl --max-time 15 'https://serverlist.piaservers.net/vpninfo/servers/v6' -o "$DATAFILE_NEW.temp" || exit 1
+	curl --max-time 15 --retry 3 --retry-delay 2 --retry-connrefused "$PIA_SERVERLIST_URL" -o "$DATAFILE_NEW.temp" || {
+		echo "Failed to download server list after retries"
+		exit 1
+	}
 	if [ "$(head -n1 < "$DATAFILE_NEW.temp" | jq '.regions | map_values(select(.servers.wg)) | keys' 2>/dev/null | wc -l)" -le 30 ]
 	then
 		echo "Bad serverlist retrieved to $DATAFILE_NEW.temp, exiting"
@@ -264,71 +274,72 @@ then
 	fi
 fi
 
-if ! [ -r "$REMOTEINFO" ]
-then
+# Function to acquire a new auth token
+# Requires PIA_USERNAME and optionally PIA_PASSWORD to be set
+get_new_token() {
+	local PASS="$PIA_PASSWORD"
+	if [ -z "$PIA_USERNAME" ] || [ -z "$PASS" ]
+	then
+		echo "A new auth token is required."
+	fi
+	if [ -z "$PIA_USERNAME" ]
+	then
+		read -p "Please enter your privateinternetaccess.com username: " PIA_USERNAME
+		[ -z "$PIA_USERNAME" ] && return 1
+	fi
+	if [ -z "$PASS" ]
+	then
+		echo "Your password will NOT be saved."
+		read -p "Please enter your privateinternetaccess.com password for $PIA_USERNAME: " -s PASS
+		echo
+		[ -z "$PASS" ] && return 1
+	fi
+	TOK=$(curl -s -X POST \
+		-H "Content-Type: application/json" \
+		-d "{\"username\":\"$PIA_USERNAME\",\"password\":\"$PASS\"}" \
+		"https://www.privateinternetaccess.com/api/client/v2/token" | jq -r '.token')
 	if [ -z "$TOK" ]
 	then
-		PASS="$PIA_PASSWORD"
-		if [ -z "$PIA_USERNAME" ] || [ -z "$PASS" ]
-		then
-			echo "A new auth token is required."
-		fi
-		if [ -z "$PIA_USERNAME" ]
-		then
-			read -p "Please enter your privateinternetaccess.com username: " PIA_USERNAME
-			[ -z "$PIA_USERNAME" ] && exit 1
-		fi
-		if [ -z "$PASS" ]
-		then
-			echo "Your password will NOT be saved."
-			read -p "Please enter your privateinternetaccess.com password for $PIA_USERNAME: " -s PASS
-			[ -z "$PASS" ] && exit 1
-		fi
-		TOK=$(curl -X POST \
-			-H "Content-Type: application/json" \
-			-d "{\"username\":\"$PIA_USERNAME\",\"password\":\"$PASS\"}" \
-			"https://www.privateinternetaccess.com/api/client/v2/token" | jq -r '.token')
-		if [ -z "$TOK" ]
-		then
-			echo "failed, trying meta server"
-			METASERVER="$(jq -r ".servers.meta[0].ip" "$CONNCACHE")"
-			METADNS="$(jq -r ".servers.meta[0].cn" "$CONNCACHE")"
-			TOK=$(curl -s \
-				--cacert "$PIA_CERT" \
-				--resolve "$METADNS:443:$METASERVER" \
-				-u "$PIA_USERNAME:$PASS" \
-				"https://$METADNS/authv3/generateToken" \
-				| jq -r ".token")
-		fi
-		if [ -z "$TOK" ]
-		then
-			echo "PIA API v2 failed, trying V3"
-			TOK=$(curl -s -u "$PIA_USERNAME:$PASS" \
-				"https://privateinternetaccess.com/gtoken/generateToken" | jq -r '.token')
-		fi
-
-		if [ -z "$PIA_PASSWORD" ]
-		then
-			unset PASS
-			echo "Your password has been forgotten, please edit $CONFIG and set PIA_PASSWORD if you wish to store it permanently."
-		fi
-
-		# echo "got token: $TOK"
-
-		if [ -z "$TOK" ]; then
-			echo "Failed to authenticate with privateinternetaccess"
-			echo "Check your user/pass and try again"
-			exit 1
-		fi
-
-		touch "$TOKENFILE"
-		chmod 600 "$TOKENFILE"
-		echo "$TOK" > "$TOKENFILE"
-
-		echo "Functional DNS is no longer required."
-		echo "If you're setting up in a region with heavy internet restrictions, you can disable your alternate VPN or connection method now"
+		echo "failed, trying meta server"
+		METASERVER="$(jq -r ".servers.meta[0].ip" "$CONNCACHE")"
+		METADNS="$(jq -r ".servers.meta[0].cn" "$CONNCACHE")"
+		TOK=$(curl -s \
+			--cacert "$PIA_CERT" \
+			--resolve "$METADNS:443:$METASERVER" \
+			-u "$PIA_USERNAME:$PASS" \
+			"https://$METADNS/authv3/generateToken" \
+			| jq -r ".token")
+	fi
+	if [ -z "$TOK" ]
+	then
+		echo "PIA API v2 failed, trying V3"
+		TOK=$(curl -s -u "$PIA_USERNAME:$PASS" \
+			"https://privateinternetaccess.com/gtoken/generateToken" | jq -r '.token')
 	fi
 
+	if [ -z "$PIA_PASSWORD" ]
+	then
+		unset PASS
+		echo "Your password has been forgotten, please edit $CONFIG and set PIA_PASSWORD if you wish to store it permanently."
+	fi
+
+	if [ -z "$TOK" ]; then
+		echo "Failed to authenticate with privateinternetaccess"
+		echo "Check your user/pass and try again"
+		return 1
+	fi
+
+	touch "$TOKENFILE"
+	chmod 600 "$TOKENFILE"
+	echo "$TOK" > "$TOKENFILE"
+
+	echo "Functional DNS is no longer required."
+	echo "If you're setting up in a region with heavy internet restrictions, you can disable your alternate VPN or connection method now"
+	return 0
+}
+
+# Function to register public key with server (tries CN first, then DNS fallback)
+register_key() {
 	echo "Registering public key with ${BOLD}$WG_NAME $WG_HOST${NORMAL}"
 	[ "$EUID" -eq 0 ] && [ -z "$OPT_CONFIGONLY" ] && ip rule add to "$WG_HOST" lookup $HARDWARE_ROUTE_TABLE pref 10 2>/dev/null
 
@@ -359,16 +370,71 @@ then
 				echo "  you may need to ${BOLD}ip link del dev $PIA_INTERFACE${NORMAL} and try this script again"
 			fi
 			rm -f "$CONNCACHE" "$REMOTEINFO"
+			return 1
+		fi
+	fi
+	return 0
+}
+
+if ! [ -r "$REMOTEINFO" ]
+then
+	if [ -z "$TOK" ]
+	then
+		if ! get_new_token; then
 			exit 1
 		fi
 	fi
 
+	if ! register_key
+	then
+		exit 1
+	fi
+
 	if [ "$(jq -r .status "$REMOTEINFO.temp")" != "OK" ]
 	then
-		echo "WG key registration failed - bad token?"
-		jq "$REMOTEINFO.temp"
-		echo "If you see an auth error, consider deleting $TOKENFILE and getting a new token"
-		exit 1
+		echo "WG key registration failed - possible token issue"
+		jq . "$REMOTEINFO.temp"
+
+		# Check if this looks like an auth/token error and attempt automatic refresh
+		ADDKEY_STATUS="$(jq -r '.message // .status // empty' "$REMOTEINFO.temp" 2>/dev/null)"
+		if echo "$ADDKEY_STATUS" | grep -qi 'auth\|token\|login\|unauthorized\|forbidden'; then
+			echo
+			echo "Detected authentication error - token may have expired (PIA tokens expire after 24h)."
+			echo "Attempting to refresh token automatically..."
+			echo
+
+			if [ -z "$PIA_PASSWORD" ]
+			then
+				echo "PIA_PASSWORD is not saved in $CONFIG, cannot auto-refresh."
+				echo "Please add PIA_PASSWORD to your config for automatic token refresh,"
+				echo "or manually delete $TOKENFILE and re-run this script."
+				exit 1
+			fi
+
+			# Clear stale token and fetch a new one
+			rm -f "$TOKENFILE"
+			unset TOK
+			if get_new_token
+			then
+				echo "Token refreshed successfully, retrying key registration..."
+				if ! register_key
+				then
+					exit 1
+				fi
+				if [ "$(jq -r .status "$REMOTEINFO.temp")" != "OK" ]
+				then
+					echo "Key registration still failed after token refresh:"
+					jq . "$REMOTEINFO.temp"
+					exit 1
+				fi
+			else
+				echo "Automatic token refresh failed. Check your credentials in $CONFIG"
+				exit 1
+			fi
+		else
+			echo "Registration failed for a non-auth reason. See output above."
+			exit 1
+		fi
 	fi
 
 	mv  "$REMOTEINFO.temp" \
@@ -419,7 +485,7 @@ then
 	then
 		echo "Updating existing interface '$PIA_INTERFACE'"
 
-		OLD_PEER_IP="$(ip -j addr show dev pia | jq -r '.[].addr_info[].local')"
+		OLD_PEER_IP="$(ip -j addr show dev "$PIA_INTERFACE" | jq -r '.[].addr_info[].local')"
 		OLD_KEY="$(echo $(wg showconf "$PIA_INTERFACE" | grep ^PublicKey | cut -d= -f2-))"
 		OLD_ENDPOINT="$(wg show "$PIA_INTERFACE" endpoints | grep "$OLD_KEY" | cut "-d${TAB}" -f2 | cut -d: -f1)"
 
@@ -492,7 +558,7 @@ else
 
 	if ip link list "$PIA_INTERFACE" > /dev/null
 	then
-		OLD_PEER_IP="$(ip -j addr show dev pia | jq '.[].addr_info[].local')"
+		OLD_PEER_IP="$(ip -j addr show dev "$PIA_INTERFACE" | jq '.[].addr_info[].local')"
 		OLD_KEY="$(echo $(wg showconf "$PIA_INTERFACE" | grep ^PublicKey | cut -d= -f2))"
 		OLD_ENDPOINT="$(wg show "$PIA_INTERFACE" endpoints | grep "$OLD_KEY" | cut "-d${TAB}" -f2 | cut -d: -f1)"
 
@@ -534,9 +600,11 @@ if find "$DATAFILE_NEW" -mtime -3 -exec false {} +
 then
 	echo "PIA endpoint list is stale, Fetching new generation wireguard server list"
 
-	echo curl --max-time 15 --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --resolve "$WG_CN:443:10.0.0.1" "https://$WG_CN:443/vpninfo/servers/v6"
-	curl --max-time 15 --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --resolve "$WG_CN:443:10.0.0.1" "https://$WG_CN:443/vpninfo/servers/v6" > "$DATAFILE_NEW.temp" || \
-	curl --max-time 15 'https://serverlist.piaservers.net/vpninfo/servers/v6' > "$DATAFILE_NEW.temp" || exit 0
+	echo curl --max-time 15 --retry 3 --retry-delay 2 --retry-connrefused --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --resolve "$WG_CN:443:10.0.0.1" "https://$WG_CN:443/vpninfo/servers/v6"
+	curl --max-time 15 --retry 3 --retry-delay 2 --retry-connrefused --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --resolve "$WG_CN:443:10.0.0.1" "https://$WG_CN:443/vpninfo/servers/v6" > "$DATAFILE_NEW.temp" || \
+	curl --max-time 15 --retry 3 --retry-delay 2 --retry-connrefused "$PIA_SERVERLIST_URL" > "$DATAFILE_NEW.temp" || {
+		echo "Failed to download server list after retries, continuing with stale list"
+	}
 
 	if [ "$(jq '.regions | map_values(select(.servers.wg)) | keys' "$DATAFILE_NEW.temp" 2>/dev/null | wc -l)" -le 30 ]
 	then
