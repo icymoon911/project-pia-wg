@@ -1,11 +1,21 @@
 #!/bin/bash
 
+# Terminal formatting (stdout - backward compatible)
 if [ -t 1 ]
 then
 	BOLD=$'\e[1m'
 	NORMAL=$'\e[0m'
 fi
 TAB=$'\t'
+
+# Terminal formatting (stderr - for logging helpers in pia-common.sh)
+if [ -t 2 ]
+then
+	BOLD_ERR=$'\e[1m'
+	RED_ERR=$'\e[31m'
+	YELLOW_ERR=$'\e[33m'
+	NORMAL_ERR=$'\e[0m'
+fi
 
 if [ -z "$CONFIGDIR" ]
 then
@@ -123,3 +133,32 @@ if [ -z "$PF_BINDFILE" ]
 then
 	PF_BINDFILE="$CONFIGDIR/pf-bind"
 fi
+
+# pia_findserver <server_ip>
+# Look up a server region in DATAFILE_NEW by its WireGuard endpoint IP.
+# Tries exact match first, then a /24 prefix fuzzy match.
+# Prints the matching region JSON object to stdout.
+# Returns 0 on success, 1 if nothing matched.
+pia_findserver() {
+	local _ip="$1"
+	local _info
+
+	# Exact match
+	_info="$(jq -c '.regions[] | select(.servers.wg[0].ip == "'"$_ip"'")' "$DATAFILE_NEW" 2>/dev/null | head -n1)"
+
+	if [ -z "$_info" ]; then
+		# Fuzzy /24 prefix match
+		local _prefix
+		_prefix="$(cut -d. -f1-3 <<< "$_ip")"
+		_info="$(jq -c '.regions[] | select(.servers.wg[0].ip | test("^'"$_prefix"'\\."))' "$DATAFILE_NEW" 2>/dev/null | head -n1)"
+		if [ -n "$_info" ]; then
+			echo "Note: inexact match for ${_prefix}.* ($_ip not found in server list)" >&2
+		fi
+	fi
+
+	if [ -n "$_info" ]; then
+		printf '%s\n' "$_info"
+		return 0
+	fi
+	return 1
+}

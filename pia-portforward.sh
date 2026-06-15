@@ -1,16 +1,8 @@
 #!/bin/bash
 
-PIA_CONFIG="$(dirname "$(realpath "$(which "$0")")")/pia-config.sh"
-
-if ! [ -r "$PIA_CONFIG" ]
-then
-	echo "Can't find pia-config.sh at $PIA_CONFIG - if you've symlinked pia-wg.sh, please also symlink that file"
-	EXIT=1
-fi
-
-[ -n "$EXIT" ] && exit 1
-
-source "$PIA_CONFIG"
+LOG_PREFIX="pia-portforward"
+PIA_COMMON="$(dirname "$(realpath "$(which "$0")")")/pia-common.sh"
+[ -r "$PIA_COMMON" ] && source "$PIA_COMMON" || exit 1
 
 if [ -r "$CONNCACHE" ]
 then
@@ -21,26 +13,12 @@ SERVER_IP="$(jq -r .server_ip "$REMOTEINFO")"
 
 if [ -z "$WG_INFO" ]
 then
-	WG_INFO="$(jq '.regions | .[] | select(.servers.wg[0].ip == "'"$SERVER_IP"'")' "$DATAFILE_NEW")"
-fi
-
-if [ -z "$WG_INFO" ]
-then
-	SERVER_IP_S="$(cut -d. -f1-3 <<< $SERVER_IP)"
-	WG_INFO="$(jq '.regions | .[] | select(.servers.wg[0].ip | test("^'"$SERVER_IP_S"'"))' "$DATAFILE_NEW")"
-fi
-
-if [ -z "$WG_INFO" ]
-then
-	echo "Couldn't determine server information even with fuzzy search, is your $DATAFILE_NEW ok?" >/dev/stderr
-	exit 1
+	WG_INFO="$(pia_findserver "$SERVER_IP")" || die "Couldn't determine server information for $SERVER_IP, is your $DATAFILE_NEW ok?"
 fi
 
 if [ "$(jq -r .port_forward <<< "$WG_INFO")" != true ]
 then
-	echo "Current server doesn't support port forwarding:"
-	jq . <<< "$WG_INFO"
-	exit 1
+	die "Current server doesn't support port forwarding:$(echo; jq . <<< "$WG_INFO")"
 fi
 
 WG_NAME="$(jq -r .name <<< "$WG_INFO")"
@@ -65,7 +43,7 @@ fi
 
 if [ $(( "$PF_TOKEN_EXPIRY" - $(date -u +%s) )) -le 900 ]
 then
-	echo "Signature stale, refetching"
+	log "Signature stale, refetching"
 
 	# Very strange - must connect via 10.0/8 private VPN link to the server's public IP - why?
 	# I tried SERVER_VIP (10.0/8 private IP) instead of SERVER_IP (public IP) but it won't connect
@@ -75,9 +53,7 @@ then
 	PF_STATUS="$(jq -r .status <<< "$PF_SIG")"
 	if [ "$PF_STATUS" != "OK" ]
 	then
-		echo "Signature retrieval failed: $PF_STATUS"
-		jq . <<< "$PF_SIG"
-		exit 1
+		die "Signature retrieval failed: $PF_STATUS$(echo; jq . <<< "$PF_SIG")"
 	fi
 
 	PF_PAYLOAD_RAW=$(jq -r .payload <<< "$PF_SIG")
@@ -94,17 +70,11 @@ PF_BIND="$(curl --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --get --silent
 PF_STATUS="$(jq -r .status <<< "$PF_BIND")"
 if [ "$PF_STATUS" != "OK" ]
 then
-	echo "Bind failed: $PF_STATUS"
-	jq . <<< "$PF_BIND"
-	exit 1
+	die "Bind failed: $PF_STATUS$(echo; jq . <<< "$PF_BIND")"
 fi
 
-( echo -n "PIA Server->Bind: "; jq -r .message <<< "$PF_BIND"; ) > /dev/stderr
-
-echo > /dev/stderr
-echo -n "Bound port: " > /dev/stderr
-echo "$PF_PORT"
-echo > /dev/stderr
+log "PIA Server->Bind: $(jq -r .message <<< "$PF_BIND")"
+log "Bound port: $PF_PORT"
 
 ###############################################################################
 #                                                                             #
@@ -114,13 +84,13 @@ echo > /dev/stderr
 
 if [ "$(type -t portforward_hook)" == "function" ]
 then
-	echo "Executing portforward hook ..."
+	log "Executing portforward hook ..."
 	( portforward_hook $PF_PORT; )
 else
-	echo "You could provide a portforward hook in your pia-wg.conf to automatically feed the bound port to some other program or system"
-	echo "To do so, add:"
-	echo "    portforward_hook() { my_program $PF_PORT; }"
-	echo "or similar to $PIA_CONFIG"
+	log "You could provide a portforward hook in your pia-wg.conf to automatically feed the bound port to some other program or system"
+	log "To do so, add:"
+	log "    portforward_hook() { my_program \$PF_PORT; }"
+	log "or similar to $PIA_CONFIG"
 fi
 
 ###############################################################################

@@ -1,16 +1,8 @@
 #!/bin/bash
 
-PIA_CONFIG="$(dirname "$(realpath "$(which "$0")")")/pia-config.sh"
-
-if ! [ -r "$PIA_CONFIG" ]
-then
-	echo "Can't find pia-config.sh at $PIA_CONFIG - if you've symlinked pia-wg.sh, please also symlink that file"
-	EXIT=1
-fi
-
-[ -n "$EXIT" ] && exit 1
-
-source "$PIA_CONFIG"
+LOG_PREFIX="pia-check"
+PIA_COMMON="$(dirname "$(realpath "$(which "$0")")")/pia-common.sh"
+[ -r "$PIA_COMMON" ] && source "$PIA_COMMON" || exit 1
 
 SERVER_VIP="$(jq -r .server_vip "$REMOTEINFO")"
 
