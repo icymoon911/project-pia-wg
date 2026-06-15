@@ -29,7 +29,7 @@ do
 			OPT_FAST=1
 			;;
 		*)
-			echo "Unrecognized option: $1"
+			log_error "Unrecognized option: $1"
 			shift
 			OPT_SHOWHELP=1
 			;;
@@ -54,24 +54,27 @@ fi
 
 if ! which curl &>/dev/null
 then
-	echo "The 'curl' utility is required"
-	echo "    Most package managers should have a 'curl' package available"
+	log_error "The 'curl' utility is required"
+	log_error "    Most package managers should have a 'curl' package available"
 	EXIT=1
 fi
 
 if ! which jq &>/dev/null
 then
-	echo "The 'jq' utility is required"
-	echo "    Most package managers should have a 'jq' package available"
+	log_error "The 'jq' utility is required"
+	log_error "    Most package managers should have a 'jq' package available"
 	EXIT=1
 fi
 
 if ! which wg &>/dev/null
 then
-	echo -n "The 'wg' utility from wireguard-tools is needed to generate keys"
-	[ -z "$OPT_CONFIGONLY" ] && echo -n " and apply settings to this machine"
-	echo
-	echo "    Most package managers should have a 'wireguard-tools' package available"
+	if [ -z "$OPT_CONFIGONLY" ]
+	then
+		log_error "The 'wg' utility from wireguard-tools is needed to generate keys and apply settings to this machine"
+	else
+		log_error "The 'wg' utility from wireguard-tools is needed to generate keys"
+	fi
+	log_error "    Most package managers should have a 'wireguard-tools' package available"
 	EXIT2=1
 fi
 
@@ -79,42 +82,35 @@ if [ -z "$OPT_CONFIGONLY" ]
 then
 	if ! which ip &>/dev/null
 	then
-		echo "The 'ip' utility from iproute2 is needed to apply settings to this machine"
-		echo "    Most package managers should have a 'iproute2' package available"
+		log_error "The 'ip' utility from iproute2 is needed to apply settings to this machine"
+		log_error "    Most package managers should have a 'iproute2' package available"
 		EXIT2=1
 	fi
 
 	if [ -n "$EXIT2" ]
 	then
-		echo
-		echo "You can use the -c option if you wish to only generate a config"
+		echo >&2
+		log_info "You can use the -c option if you wish to only generate a config"
 	fi
 	EXIT="${EXIT}${EXIT2}"
 else
 	if ! which qrencode &>/dev/null
 	then
-		echo "The 'qrencode' utility is recommended if you want to generate a config for the WireGuard Android/iOS apps"
-		echo "    It will allow you to load the config easily by scanning a QR code printed to this terminal"
-		echo "    A config will still be generated without it, but you will have to apply it by another method"
+		log_info "The 'qrencode' utility is recommended if you want to generate a config for the WireGuard Android/iOS apps"
+		log_info "    It will allow you to load the config easily by scanning a QR code printed to this terminal"
+		log_info "    A config will still be generated without it, but you will have to apply it by another method"
 		# this is not an error, do not set EXIT
 	fi
 fi
 
-PIA_CONFIG="$(dirname "$(realpath "$(which "$0")")")/pia-config.sh"
+source "$(dirname "$(realpath "$(which "$0")")")/pia-common.sh"
 
-if ! [ -r "$PIA_CONFIG" ]
-then
-	echo "Can't find 'pia-config.sh' at $PIA_CONFIG - please ensure it is present at that location, or suggest an improvement to this script for finding it"
-	EXIT=1
-fi
-
-[ -n "$EXIT" ] && exit 1
-
-source "$PIA_CONFIG"
+# Track temp files for cleanup on exit/signal
+pia_track_temp "$DATAFILE_NEW.temp" "$REMOTEINFO.temp"
 
 if ! [ -r "$CONFIG" ]
 then
-	echo "Cannot read '$CONFIG', generating a default one"
+	log_info "Cannot read '$CONFIG', generating a default one"
 	if [ -z "$PIA_USERNAME" ]
 	then
 		read -p "Please enter your privateinternetaccess.com username: " PIA_USERNAME
@@ -151,18 +147,18 @@ CLIENT_PRIVATE_KEY="$CLIENT_PRIVATE_KEY"
 # you can use \$PF_PORT for the received port numberr
 # PORTFORWARD_HOOK="my_program \$PF_PORT"
 ENDCONFIG
-	echo "Config saved"
+	log_info "Config saved"
 fi
 
 # fetch data-new.json if missing
 if ! [ -r "$DATAFILE_NEW" ]
 then
-	echo "Fetching new generation server list from PIA"
+	log_info "Fetching new generation server list from PIA"
 	curl --max-time 15 'https://serverlist.piaservers.net/vpninfo/servers/v6' -o "$DATAFILE_NEW.temp" || exit 1
 	if [ "$(head -n1 < "$DATAFILE_NEW.temp" | jq '.regions | map_values(select(.servers.wg)) | keys' 2>/dev/null | wc -l)" -le 30 ]
 	then
-		echo "Bad serverlist retrieved to $DATAFILE_NEW.temp, exiting"
-		echo "You can try again if there was a transient error"
+		log_error "Bad serverlist retrieved to $DATAFILE_NEW.temp, exiting"
+		log_error "You can try again if there was a transient error"
 		exit 1
 	else
 		head -n1 < "$DATAFILE_NEW.temp" | jq -cM '.' > "$DATAFILE_NEW" 2>/dev/null
@@ -171,7 +167,7 @@ fi
 
 if ! [ -r "$PIA_CERT" ]
 then
-	echo "Fetching PIA self-signed RSA certificate from github"
+	log_info "Fetching PIA self-signed RSA certificate from github"
 	curl --max-time 15 'https://raw.githubusercontent.com/pia-foss/desktop/master/daemon/res/ca/rsa_4096.crt' > "$PIA_CERT" || exit 1
 fi
 
@@ -201,16 +197,15 @@ then
 
 	if [ "$(jq -r ".regions | .[] | select(.id == \"$LOC\")" "$DATAFILE_NEW")" == "" ]
 	then
-		echo "Location $LOC not found!"
-		echo "Options are:"
-	# 	jq '.regions | .[] | .id' "$DATAFILE_NEW" | sort | sed -e 's/^/ * /'
+		log_error "Location $LOC not found!"
+		log_error "Options are:"
 		(
 			echo "${BOLD}Location${TAB}Region${TAB}Port Forward${TAB}Geolocated${NORMAL}"
 			echo "----------------${TAB}------------------${TAB}------------${TAB}----------"
-			jq -r '.regions | .[] | '${PORTFORWARD:+'select(.port_forward) |'}' [.id, .name, .port_forward, .geo] | "'$'\e''[1m\(.[0])'$'\e''[0m\t\(.[1])\t\(.[2])\t\(.[3])"' "$DATAFILE_NEW" | sort
+			jq -r --arg bold "$BOLD" --arg normal "$NORMAL" '.regions | .[] | '${PORTFORWARD:+'select(.port_forward) |'}' [.id, .name, .port_forward, .geo] | "\($bold)\(.[0])\($normal)\t\(.[1])\t\(.[2])\t\(.[3])"' "$DATAFILE_NEW" | sort
 		) | column -t -s "${TAB}"
 		echo "${PORTFORWARD:+'Note: only port-forwarding regions displayed'}"
-		echo "Please edit $CONFIG and change your desired location, then try again"
+		log_error "Please edit $CONFIG and change your desired location, then try again"
 		exit 1
 	fi
 
@@ -220,7 +215,7 @@ then
 	WG_DNS="$( jq -r ".dns"  <<< "$SERVERINFO")"
 
 	SERVERINDEX="$(jq --arg r $RANDOM '($r|tonumber) % (.servers.wg | length)' <<< "$SERVERINFO")"
-	echo "Selecting server $(( $SERVERINDEX + 1 )) from $(jq '.servers.wg | length' <<< "$SERVERINFO") choices"
+	log_info "Selecting server $(( $SERVERINDEX + 1 )) from $(jq '.servers.wg | length' <<< "$SERVERINFO") choices"
 
 	SELECTEDSERVER="$(jq --arg i $SERVERINDEX '.servers.wg[$i|tonumber]' <<< "$SERVERINFO")"
 
@@ -234,7 +229,7 @@ then
 fi
 
 if [ -z "$WG_HOST$WG_PORT" ]; then
-  echo "wg host/port not found (bad server list?), exiting"
+  log_error "wg host/port not found (bad server list?), exiting"
   exit 1
 fi
 
@@ -248,19 +243,12 @@ then
 				ip route show | grep "dev $IF" | sed -e 's/linkdown//' | sed -e "s/^/ip route add table $HARDWARE_ROUTE_TABLE /"
 			done
 		)
-		if [ "$EUID" -eq 0 ]
-		then
-			sh <<< "$ROUTES_ADD"
-		else
-			echo "Build a routing table with only hardware links to stop wireguard packets going back through the VPN:"
-			echo sudo sh '<<<' "$ROUTES_ADD"
-			sudo sh <<< "$ROUTES_ADD"
-		fi
-		echo "Table $HARDWARE_ROUTE_TABLE (hardware network links) now contains:"
-		ip route show table "$HARDWARE_ROUTE_TABLE" | sed -e "s/^/${TAB}/"
-		echo
-		echo "${BOLD}*** PLEASE NOTE: if this table isn't updated by your network post-connect hooks, your connection cannot remain up if your network links change${NORMAL}"
-		echo "Managing such hooks is beyond the scope of this script"
+		$SUDO sh <<< "$ROUTES_ADD"
+		log_info "Table $HARDWARE_ROUTE_TABLE (hardware network links) now contains:"
+		ip route show table "$HARDWARE_ROUTE_TABLE" | sed -e "s/^/${TAB}/" >&2
+		echo >&2
+		log_warn "*** PLEASE NOTE: if this table isn't updated by your network post-connect hooks, your connection cannot remain up if your network links change"
+		echo "Managing such hooks is beyond the scope of this script" >&2
 	fi
 fi
 
@@ -271,7 +259,7 @@ then
 		PASS="$PIA_PASSWORD"
 		if [ -z "$PIA_USERNAME" ] || [ -z "$PASS" ]
 		then
-			echo "A new auth token is required."
+			log_info "A new auth token is required."
 		fi
 		if [ -z "$PIA_USERNAME" ]
 		then
@@ -280,7 +268,7 @@ then
 		fi
 		if [ -z "$PASS" ]
 		then
-			echo "Your password will NOT be saved."
+			log_info "Your password will NOT be saved."
 			read -p "Please enter your privateinternetaccess.com password for $PIA_USERNAME: " -s PASS
 			[ -z "$PASS" ] && exit 1
 		fi
@@ -290,7 +278,7 @@ then
 			"https://www.privateinternetaccess.com/api/client/v2/token" | jq -r '.token')
 		if [ -z "$TOK" ]
 		then
-			echo "failed, trying meta server"
+			log_info "failed, trying meta server"
 			METASERVER="$(jq -r ".servers.meta[0].ip" "$CONNCACHE")"
 			METADNS="$(jq -r ".servers.meta[0].cn" "$CONNCACHE")"
 			TOK=$(curl -s \
@@ -302,7 +290,7 @@ then
 		fi
 		if [ -z "$TOK" ]
 		then
-			echo "PIA API v2 failed, trying V3"
+			log_info "PIA API v2 failed, trying V3"
 			TOK=$(curl -s -u "$PIA_USERNAME:$PASS" \
 				"https://privateinternetaccess.com/gtoken/generateToken" | jq -r '.token')
 		fi
@@ -310,14 +298,12 @@ then
 		if [ -z "$PIA_PASSWORD" ]
 		then
 			unset PASS
-			echo "Your password has been forgotten, please edit $CONFIG and set PIA_PASSWORD if you wish to store it permanently."
+			log_info "Your password has been forgotten, please edit $CONFIG and set PIA_PASSWORD if you wish to store it permanently."
 		fi
 
-		# echo "got token: $TOK"
-
 		if [ -z "$TOK" ]; then
-			echo "Failed to authenticate with privateinternetaccess"
-			echo "Check your user/pass and try again"
+			log_error "Failed to authenticate with privateinternetaccess"
+			log_error "Check your user/pass and try again"
 			exit 1
 		fi
 
@@ -325,12 +311,12 @@ then
 		chmod 600 "$TOKENFILE"
 		echo "$TOK" > "$TOKENFILE"
 
-		echo "Functional DNS is no longer required."
-		echo "If you're setting up in a region with heavy internet restrictions, you can disable your alternate VPN or connection method now"
+		log_info "Functional DNS is no longer required."
+		log_info "If you're setting up in a region with heavy internet restrictions, you can disable your alternate VPN or connection method now"
 	fi
 
-	echo "Registering public key with ${BOLD}$WG_NAME $WG_HOST${NORMAL}"
-	[ "$EUID" -eq 0 ] && [ -z "$OPT_CONFIGONLY" ] && ip rule add to "$WG_HOST" lookup $HARDWARE_ROUTE_TABLE pref 10 2>/dev/null
+	log_info "Registering public key with ${BOLD}$WG_NAME $WG_HOST${NORMAL}"
+	[ -z "$OPT_CONFIGONLY" ] && $SUDO ip rule add to "$WG_HOST" lookup $HARDWARE_ROUTE_TABLE pref 10 2>/dev/null
 
 	if ! curl -v -v -v -D /dev/stderr -GsS \
 		--max-time 5 \
@@ -340,7 +326,7 @@ then
 		--resolve "$WG_CN:$WG_PORT:$WG_HOST" \
 		"https://$WG_CN:$WG_PORT/addKey" > "$REMOTEINFO.temp"
 	then
-		echo "Registering with $WG_CN failed, trying $WG_DNS"
+		log_warn "Registering with $WG_CN failed, trying $WG_DNS"
 		# fall back to trying DNS certificate if CN fails
 		# /u/dean_oz reported that this works better for them at https://www.reddit.com/r/PrivateInternetAccess/comments/h9y4da/is_there_any_way_to_generate_wireguard_config/fyfqjf7/
 		# in testing I find that sometimes one works, sometimes the other works
@@ -352,11 +338,11 @@ then
 			--resolve "$WG_DNS:$WG_PORT:$WG_HOST" \
 			"https://$WG_DNS:$WG_PORT/addKey" > "$REMOTEINFO.temp"
 		then
-			echo "Failed to register key with $WG_SN ($WG_HOST)"
+			log_error "Failed to register key with $WG_SN ($WG_HOST)"
 			if ! [ -e "/sys/class/net/$PIA_INTERFACE" ]
 			then
-				echo "If you're trying to change hosts because your link has stopped working,"
-				echo "  you may need to ${BOLD}ip link del dev $PIA_INTERFACE${NORMAL} and try this script again"
+				log_error "If you're trying to change hosts because your link has stopped working,"
+				log_error "  you may need to ${BOLD}ip link del dev $PIA_INTERFACE${NORMAL} and try this script again"
 			fi
 			rm -f "$CONNCACHE" "$REMOTEINFO"
 			exit 1
@@ -365,9 +351,9 @@ then
 
 	if [ "$(jq -r .status "$REMOTEINFO.temp")" != "OK" ]
 	then
-		echo "WG key registration failed - bad token?"
+		log_error "WG key registration failed - bad token?"
 		jq "$REMOTEINFO.temp"
-		echo "If you see an auth error, consider deleting $TOKENFILE and getting a new token"
+		log_info "If you see an auth error, consider deleting $TOKENFILE and getting a new token"
 		exit 1
 	fi
 
@@ -410,169 +396,123 @@ ENDWG
 	exit 0
 fi
 
-# echo "Bringing up wireguard interface $PIA_INTERFACE... "
-if [ "$EUID" -eq 0 ]
+# ---- WireGuard interface setup (unified for root/non-root via $SUDO) ----
+if [ -n "$SUDO" ]
 then
-	# scratch current config if any
-	# put new settings into existing interface instead of teardown/re-up to prevent leaks
-	if ip link list "$PIA_INTERFACE" > /dev/null
-	then
-		echo "Updating existing interface '$PIA_INTERFACE'"
-
-		OLD_PEER_IP="$(ip -j addr show dev pia | jq -r '.[].addr_info[].local')"
-		OLD_KEY="$(echo $(wg showconf "$PIA_INTERFACE" | grep ^PublicKey | cut -d= -f2-))"
-		OLD_ENDPOINT="$(wg show "$PIA_INTERFACE" endpoints | grep "$OLD_KEY" | cut "-d${TAB}" -f2 | cut -d: -f1)"
-
-		# Note: unnecessary if Table != off above, but doesn't hurt.
-		# ensure we don't get a packet storm loop
-		ip rule add fwmark 51820 lookup "$HARDWARE_ROUTE_TABLE" pref 10 2>/dev/null
-
-		if [ "$OLD_KEY" != "$SERVER_PUBLIC_KEY" ]
-		then
-			echo "    [Change Peer from $OLD_KEY to $SERVER_PUBLIC_KEY]"
-			wg set "$PIA_INTERFACE" fwmark 51820 private-key <(echo "$CLIENT_PRIVATE_KEY") peer "$SERVER_PUBLIC_KEY" endpoint "$SERVER_IP:$SERVER_PORT" allowed-ips "0.0.0.0/0,::/0" || exit 1
-			# remove old key
-			wg set "$PIA_INTERFACE" peer "$OLD_KEY" remove
-		fi
-
-		if [ "$PEER_IP" != "$OLD_PEER_IP/32" ]
-		then
-			echo "    [Change $PIA_INTERFACE ipaddr from $OLD_PEER_IP to $PEER_IP]"
-			# update link ip address in case
-			ip addr replace "$PEER_IP" dev "$PIA_INTERFACE"
-			ip addr del "$OLD_PEER_IP/32" dev "$PIA_INTERFACE"
-
-			# remove old route
-			ip rule del to "$OLD_PEER_IP" lookup "$HARDWARE_ROUTE_TABLE" 2>/dev/null
-		fi
-
-		# Note: only if Table = off in wireguard config file above
-		ip route add default dev "$PIA_INTERFACE" 2>/dev/null
-
-		# Specific to my setup
-		ip route add default table "$VPNONLY_ROUTE_TABLE" dev "$PIA_INTERFACE" 2>/dev/null
-	else
-		echo "Bringing up interface '$PIA_INTERFACE'"
-
-		# Note: unnecessary if Table != off above, but doesn't hurt.
-		ip rule add fwmark 51820 lookup "$HARDWARE_ROUTE_TABLE" pref 10 2>/dev/null
-
-		# bring up wireguard interface
-		ip link add "$PIA_INTERFACE" type wireguard || exit 1
-		ip link set dev "$PIA_INTERFACE" up || exit 1
-		wg set "$PIA_INTERFACE" fwmark 51820 private-key <(echo "$CLIENT_PRIVATE_KEY") peer "$SERVER_PUBLIC_KEY" endpoint "$SERVER_IP:$SERVER_PORT" allowed-ips "0.0.0.0/0,::/0" || exit 1
-		ip addr replace "$PEER_IP" dev "$PIA_INTERFACE" || exit 1
-
-		# Note: only if Table = off in wireguard config file above
-		ip route add default dev "$PIA_INTERFACE" 2>/dev/null
-
-		# Specific to my setup
-		ip route add default table "$VPNONLY_ROUTE_TABLE" dev "$PIA_INTERFACE" 2>/dev/null
-
-	fi
-else
 	echo
-	echo "Not running as root/sudo - did you want to specify -c (config only) ?"
-	echo "Setup commands will now be fed through sudo"
+	log_info "Not running as root/sudo - did you want to specify -c (config only) ?"
+	log_info "Setup commands will now be fed through sudo"
 	echo
-	echo ip rule add fwmark 51820 lookup $HARDWARE_ROUTE_TABLE pref 10
-	sudo ip rule add fwmark 51820 lookup $HARDWARE_ROUTE_TABLE pref 10 || exit 1
-
-	if ! ip link list "$PIA_INTERFACE" > /dev/null
-	then
-		echo ip link add "$PIA_INTERFACE" type wireguard
-		sudo ip link add "$PIA_INTERFACE" type wireguard || exit 1
-	fi
-
-	echo wg set "$PIA_INTERFACE" fwmark 51820 private-key "$CLIENT_PRIVATE_KEY"         peer "$SERVER_PUBLIC_KEY" endpoint "$SERVER_IP:$SERVER_PORT" allowed-ips "0.0.0.0/0,::/0"
-	sudo wg set "$PIA_INTERFACE" fwmark 51820 private-key <(echo "$CLIENT_PRIVATE_KEY") peer "$SERVER_PUBLIC_KEY" endpoint "$SERVER_IP:$SERVER_PORT" allowed-ips "0.0.0.0/0,::/0" || exit 1
-
-	echo ip addr replace "$PEER_IP" dev "$PIA_INTERFACE"
-	sudo ip addr replace "$PEER_IP" dev "$PIA_INTERFACE" || exit 1
-
-	if ip link list "$PIA_INTERFACE" > /dev/null
-	then
-		OLD_PEER_IP="$(ip -j addr show dev pia | jq '.[].addr_info[].local')"
-		OLD_KEY="$(echo $(wg showconf "$PIA_INTERFACE" | grep ^PublicKey | cut -d= -f2))"
-		OLD_ENDPOINT="$(wg show "$PIA_INTERFACE" endpoints | grep "$OLD_KEY" | cut "-d${TAB}" -f2 | cut -d: -f1)"
-
-		echo wg set "$PIA_INTERFACE" peer "$OLD_KEY" remove
-		sudo wg set "$PIA_INTERFACE" peer "$OLD_KEY" remove || exit 1
-	fi
-
-	echo ip route add default dev "$PIA_INTERFACE"
-	sudo ip route add default dev "$PIA_INTERFACE" || exit 1
 fi
 
-echo "PIA Wireguard '$PIA_INTERFACE' configured successfully"
+if ! ip link list "$PIA_INTERFACE" > /dev/null 2>&1
+then
+	log_info "Bringing up interface '$PIA_INTERFACE'"
+
+	$SUDO ip rule add fwmark 51820 lookup "$HARDWARE_ROUTE_TABLE" pref 10 2>/dev/null
+	$SUDO ip link add "$PIA_INTERFACE" type wireguard || exit 1
+	$SUDO ip link set dev "$PIA_INTERFACE" up || exit 1
+	$SUDO wg set "$PIA_INTERFACE" fwmark 51820 private-key <(echo "$CLIENT_PRIVATE_KEY") peer "$SERVER_PUBLIC_KEY" endpoint "$SERVER_IP:$SERVER_PORT" allowed-ips "0.0.0.0/0,::/0" || exit 1
+	$SUDO ip addr replace "$PEER_IP" dev "$PIA_INTERFACE" || exit 1
+else
+	log_info "Updating existing interface '$PIA_INTERFACE'"
+
+	OLD_PEER_IP="$(ip -j addr show dev "$PIA_INTERFACE" | jq -r '.[].addr_info[].local')"
+	OLD_KEY="$(wg showconf "$PIA_INTERFACE" | grep ^PublicKey | cut -d= -f2- | xargs)"
+	OLD_ENDPOINT="$(wg show "$PIA_INTERFACE" endpoints | grep "$OLD_KEY" | cut "-d${TAB}" -f2 | cut -d: -f1)"
+
+	# ensure we don't get a packet storm loop
+	$SUDO ip rule add fwmark 51820 lookup "$HARDWARE_ROUTE_TABLE" pref 10 2>/dev/null
+
+	if [ "$OLD_KEY" != "$SERVER_PUBLIC_KEY" ]
+	then
+		log_info "Change peer from $OLD_KEY to $SERVER_PUBLIC_KEY"
+		$SUDO wg set "$PIA_INTERFACE" fwmark 51820 private-key <(echo "$CLIENT_PRIVATE_KEY") peer "$SERVER_PUBLIC_KEY" endpoint "$SERVER_IP:$SERVER_PORT" allowed-ips "0.0.0.0/0,::/0" || exit 1
+		$SUDO wg set "$PIA_INTERFACE" peer "$OLD_KEY" remove
+	fi
+
+	if [ "$PEER_IP" != "$OLD_PEER_IP/32" ]
+	then
+		log_info "Change $PIA_INTERFACE ipaddr from $OLD_PEER_IP to $PEER_IP"
+		$SUDO ip addr replace "$PEER_IP" dev "$PIA_INTERFACE"
+		$SUDO ip addr del "$OLD_PEER_IP/32" dev "$PIA_INTERFACE"
+		$SUDO ip rule del to "$OLD_PEER_IP" lookup "$HARDWARE_ROUTE_TABLE" 2>/dev/null
+	fi
+fi
+
+$SUDO ip route add default dev "$PIA_INTERFACE" 2>/dev/null
+$SUDO ip route add default table "$VPNONLY_ROUTE_TABLE" dev "$PIA_INTERFACE" 2>/dev/null
+
+log_info "PIA Wireguard '$PIA_INTERFACE' configured successfully"
 
 if [ -n "$OPT_FAST" ]
 then
-	echo "-f FAST supplied, skipping connection test and serverlist update"
+	log_info "-f FAST supplied, skipping connection test and serverlist update"
 	exit 0
 fi
 
 TRIES=0
-echo -n "Waiting for connection to stabilise..."
+echo -n "Waiting for connection to stabilise..." >&2
 ping -n -c1 -w 1 -s 1280 -I "$PIA_INTERFACE" "$SERVER_VIP" &>/dev/null
-# while ! ping -n -c1 -w 1 -s 1280 -I "$PIA_INTERFACE" "$SERVER_VIP" &>/dev/null
 while [ $(( $(date +%s) - $(wg show "$PIA_INTERFACE" latest-handshakes | cut $'-d\t' -f2) )) -gt 120 ]
 do
-	echo -n "$(wg show "$PIA_INTERFACE" latest-handshakes | cut $'-d\t' -f2)."
+	echo -n "$(wg show "$PIA_INTERFACE" latest-handshakes | cut $'-d\t' -f2)." >&2
 	TRIES=$(( $TRIES + 1 ))
 	if [[ $TRIES -ge 5 ]]
 	then
-		echo "Connection failed to stabilise, try again"
+		log_error "Connection failed to stabilise, try again"
 		rm -f "$CONNCACHE" "$REMOTEINFO"
 		exit 1
 	fi
 	sleep 1 # so we can catch ctrl+c
 done
-echo " OK"
+echo " OK" >&2
 
 if find "$DATAFILE_NEW" -mtime -3 -exec false {} +
 then
-	echo "PIA endpoint list is stale, Fetching new generation wireguard server list"
+	log_info "PIA endpoint list is stale, fetching new generation wireguard server list"
 
-	echo curl --max-time 15 --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --resolve "$WG_CN:443:10.0.0.1" "https://$WG_CN:443/vpninfo/servers/v6"
+	log_info "Trying via VPN tunnel ($WG_CN)..."
 	curl --max-time 15 --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --resolve "$WG_CN:443:10.0.0.1" "https://$WG_CN:443/vpninfo/servers/v6" > "$DATAFILE_NEW.temp" || \
-	curl --max-time 15 'https://serverlist.piaservers.net/vpninfo/servers/v6' > "$DATAFILE_NEW.temp" || exit 0
+	curl --max-time 15 'https://serverlist.piaservers.net/vpninfo/servers/v6' > "$DATAFILE_NEW.temp" || {
+		log_warn "Failed to refresh server list, using cached data"
+	}
 
-	if [ "$(jq '.regions | map_values(select(.servers.wg)) | keys' "$DATAFILE_NEW.temp" 2>/dev/null | wc -l)" -le 30 ]
+	if [ -r "$DATAFILE_NEW.temp" ]
 	then
-		echo "Bad serverlist retrieved to $DATAFILE_NEW.temp, exiting"
-		echo "You can try again if there was a transient error"
-		# exit 1 // this isn't a fatal error, just an inconvenience
-	else
-		jq -cM '.' "$DATAFILE_NEW.temp" > "$DATAFILE_NEW" 2>/dev/null
+		if [ "$(jq '.regions | map_values(select(.servers.wg)) | keys' "$DATAFILE_NEW.temp" 2>/dev/null | wc -l)" -le 30 ]
+		then
+			log_warn "Bad serverlist in $DATAFILE_NEW.temp, keeping existing list"
+		else
+			jq -cM '.' "$DATAFILE_NEW.temp" > "$DATAFILE_NEW" 2>/dev/null
+		fi
+		rm -f "$DATAFILE_NEW.temp"
 	fi
 fi
 
 if [ -n "$PORTFORWARD" ]
 then
-	echo "Requesting forwarded port..."
+	log_info "Requesting forwarded port..."
+	PIA_PORTFORWARD=""
 	if which pia-portforward.sh &>/dev/null
 	then
-		pia-portforward.sh
-	else
-		if [ -e "${0%/*}/pia-portforward.sh" ]
-		then
-			"${0%/*}/pia-portforward.sh"
-		else
-			PIA_PORTFORWARD="$(dirname "$(realpath "$(which "$0")")")/pia-portforward.sh"
-			if [ -e "$PIA_PORTFORWARD" ]
-			then
-				"$PIA_PORTFORWARD"
-			else
-				echo "pia-portforward.sh couldn't be found!"
-				exit 1
-			fi
-		fi
+		PIA_PORTFORWARD="pia-portforward.sh"
+	elif [ -e "$PIA_SCRIPT_DIR/pia-portforward.sh" ]
+	then
+		PIA_PORTFORWARD="$PIA_SCRIPT_DIR/pia-portforward.sh"
 	fi
-	echo "Note: pia-portforward.sh should be called every ~5 minutes to maintain your forward."
-	echo "You could try:"
-	echo "    while sleep 5m; do pia-portforward.sh; done"
-	echo "or alternately add a cronjob with crontab -e"
+
+	if [ -n "$PIA_PORTFORWARD" ]
+	then
+		"$PIA_PORTFORWARD"
+	else
+		log_error "pia-portforward.sh couldn't be found!"
+		exit 1
+	fi
+	log_info "Note: pia-portforward.sh should be called every ~5 minutes to maintain your forward."
+	log_info "You could try:"
+	echo "    while sleep 5m; do pia-portforward.sh; done" >&2
+	log_info "or alternately add a cronjob with crontab -e"
 fi
 
 exit 0

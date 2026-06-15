@@ -1,44 +1,14 @@
 #!/bin/bash
 
-PIA_CONFIG="$(dirname "$(realpath "$(which "$0")")")/pia-config.sh"
-
-if ! [ -r "$PIA_CONFIG" ]
-then
-	echo "Can't find pia-config.sh at $PIA_CONFIG - if you've symlinked pia-wg.sh, please also symlink that file"
-	EXIT=1
-fi
-
-[ -n "$EXIT" ] && exit 1
-
-source "$PIA_CONFIG"
-
-if [ -r "$CONNCACHE" ]
-then
-	WG_INFO="$(jq -r . "$CONNCACHE")"
-fi
+source "$(dirname "$(realpath "$(which "$0")")")/pia-common.sh"
 
 SERVER_IP="$(jq -r .server_ip "$REMOTEINFO")"
 
-if [ -z "$WG_INFO" ]
-then
-	WG_INFO="$(jq '.regions | .[] | select(.servers.wg[0].ip == "'"$SERVER_IP"'")' "$DATAFILE_NEW")"
-fi
-
-if [ -z "$WG_INFO" ]
-then
-	SERVER_IP_S="$(cut -d. -f1-3 <<< $SERVER_IP)"
-	WG_INFO="$(jq '.regions | .[] | select(.servers.wg[0].ip | test("^'"$SERVER_IP_S"'"))' "$DATAFILE_NEW")"
-fi
-
-if [ -z "$WG_INFO" ]
-then
-	echo "Couldn't determine server information even with fuzzy search, is your $DATAFILE_NEW ok?" >/dev/stderr
-	exit 1
-fi
+WG_INFO="$(pia_lookup_server "$SERVER_IP")" || exit 1
 
 if [ "$(jq -r .port_forward <<< "$WG_INFO")" != true ]
 then
-	echo "Current server doesn't support port forwarding:"
+	log_error "Current server doesn't support port forwarding:"
 	jq . <<< "$WG_INFO"
 	exit 1
 fi
@@ -51,7 +21,7 @@ WG_CN="$(jq -r '.servers.wg[0].cn' <<< "$WG_INFO")"
 
 # sections of the below adapted from Threarah's work at
 # https://github.com/thrnz/docker-wireguard-pia/blob/003f79f3b6ba24387e10d7de63ec62e98e6518a5/run#L233-L270 with permission
-# Also see https://www.reddit.com/r/PrivateInternetAccess/comments/h9y4da/is_there_any_way_to_generate_wireguard_config/fxhkpjt/
+# Also see https://www.reddit.com/r/PrivateInternetAccess/comments/h9y4da/is_there_any_way_to_generate_wireguard_config/fxkpjt/
 
 if [ -r "$PF_SIGFILE" ]
 then
@@ -65,7 +35,7 @@ fi
 
 if [ $(( "$PF_TOKEN_EXPIRY" - $(date -u +%s) )) -le 900 ]
 then
-	echo "Signature stale, refetching"
+	log_info "Signature stale, refetching"
 
 	# Very strange - must connect via 10.0/8 private VPN link to the server's public IP - why?
 	# I tried SERVER_VIP (10.0/8 private IP) instead of SERVER_IP (public IP) but it won't connect
@@ -75,7 +45,7 @@ then
 	PF_STATUS="$(jq -r .status <<< "$PF_SIG")"
 	if [ "$PF_STATUS" != "OK" ]
 	then
-		echo "Signature retrieval failed: $PF_STATUS"
+		log_error "Signature retrieval failed: $PF_STATUS"
 		jq . <<< "$PF_SIG"
 		exit 1
 	fi
@@ -94,17 +64,17 @@ PF_BIND="$(curl --interface "$PIA_INTERFACE" --cacert "$PIA_CERT" --get --silent
 PF_STATUS="$(jq -r .status <<< "$PF_BIND")"
 if [ "$PF_STATUS" != "OK" ]
 then
-	echo "Bind failed: $PF_STATUS"
+	log_error "Bind failed: $PF_STATUS"
 	jq . <<< "$PF_BIND"
 	exit 1
 fi
 
-( echo -n "PIA Server->Bind: "; jq -r .message <<< "$PF_BIND"; ) > /dev/stderr
+log_info "PIA Server->Bind: $(jq -r .message <<< "$PF_BIND")"
 
-echo > /dev/stderr
-echo -n "Bound port: " > /dev/stderr
+echo >&2
+echo -n "Bound port: " >&2
 echo "$PF_PORT"
-echo > /dev/stderr
+echo >&2
 
 ###############################################################################
 #                                                                             #
@@ -114,13 +84,13 @@ echo > /dev/stderr
 
 if [ "$(type -t portforward_hook)" == "function" ]
 then
-	echo "Executing portforward hook ..."
+	log_info "Executing portforward hook ..."
 	( portforward_hook $PF_PORT; )
 else
-	echo "You could provide a portforward hook in your pia-wg.conf to automatically feed the bound port to some other program or system"
-	echo "To do so, add:"
-	echo "    portforward_hook() { my_program $PF_PORT; }"
-	echo "or similar to $PIA_CONFIG"
+	log_info "You could provide a portforward hook in your pia-wg.conf to automatically feed the bound port to some other program or system"
+	log_info "To do so, add:"
+	echo "    portforward_hook() { my_program $PF_PORT; }" >&2
+	log_info "or similar to $CONFIG"
 fi
 
 ###############################################################################

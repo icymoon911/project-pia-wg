@@ -1,11 +1,19 @@
 #!/bin/bash
 
-if [ -t 1 ]
-then
-	BOLD=$'\e[1m'
-	NORMAL=$'\e[0m'
+# Provide logging and terminal helpers if not already defined by pia-common.sh
+# This allows pia-config.sh to be sourced standalone for backward compatibility
+if ! declare -f log_info >/dev/null; then
+	if [ -t 2 ]; then
+		BOLD=$'\e[1m'; NORMAL=$'\e[0m'
+		RED=$'\e[31m'; YELLOW=$'\e[33m'; GREEN=$'\e[32m'
+	else
+		BOLD=""; NORMAL=""; RED=""; YELLOW=""; GREEN=""
+	fi
+	TAB=$'\t'
+	log_info()  { echo "${BOLD}[INFO]${NORMAL} $*" >&2; }
+	log_warn()  { echo "${YELLOW}[WARN]${NORMAL} $*" >&2; }
+	log_error() { echo "${RED}[ERROR]${NORMAL} $*" >&2; }
 fi
-TAB=$'\t'
 
 if [ -z "$CONFIGDIR" ]
 then
@@ -35,7 +43,7 @@ fi
 
 if [ -z "$CLIENT_PRIVATE_KEY" ]
 then
-	echo "Generating new private key"
+	log_info "Generating new private key"
 	CLIENT_PRIVATE_KEY="$(wg genkey)"
 fi
 
@@ -46,19 +54,19 @@ fi
 
 if [ -z "$CLIENT_PUBLIC_KEY" ]
 then
-	echo "Failed to generate client public key, check your config!"
+	log_error "Failed to generate client public key, check your config!"
 	exit 1
 fi
 
 if [ -z "$LOC" ]
 then
-	echo "Setting default location: ${BOLD}any${NORMAL}"
+	log_info "Setting default location: ${BOLD}any${NORMAL}"
 	LOC="."
 fi
 
 if [ -z "$PIA_INTERFACE" ]
 then
-	echo "Setting default wireguard interface name: ${BOLD}pia${NORMAL}"
+	log_info "Setting default wireguard interface name: ${BOLD}pia${NORMAL}"
 	PIA_INTERFACE="pia"
 fi
 
