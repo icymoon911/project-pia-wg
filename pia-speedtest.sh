@@ -12,6 +12,13 @@ fi
 
 source "$PIA_CONFIG"
 
+if ! which bc &>/dev/null
+then
+	echo "The 'bc' utility is required for speed calculations"
+	echo "    Most package managers should have a 'bc' package available"
+	exit 1
+fi
+
 # : ${PINGFILE:="http://cloudflaremirrors.com/archlinux/iso/latest/arch/x86_64/airootfs.sfs.sig"}
 # : ${TESTFILE:="http://cloudflaremirrors.com/archlinux/iso/latest/arch/x86_64/airootfs.sfs}
 
