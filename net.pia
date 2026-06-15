@@ -5,7 +5,9 @@ command="/root/bin/pia-wg.sh"
 : "${CONFIGDIR:=/var/cache/pia-wg}"
 : "${CONFIG:=/etc/pia-wg/pia-wg.conf}"
 
-extra_started_commands="reload"
+WATCHDOG="/root/bin/pia-watchdog.sh"
+
+extra_started_commands="reload watchdog_start watchdog_stop watchdog_status"
 
 depend() {
 	need net sysfs
@@ -45,6 +47,20 @@ start() {
 	doconn -f
 }
 
+start_post() {
+	# Start the watchdog daemon after successful VPN connection
+	if [ -x "$WATCHDOG" ]
+	then
+		ebegin "Starting PIA watchdog daemon"
+		export CONFIGDIR="$CONFIGDIR"
+		export CONFIG="$CONFIG"
+		"$WATCHDOG" start
+		eend $?
+	else
+		ewarn "Watchdog script not found at $WATCHDOG - skipping auto-monitoring"
+	fi
+}
+
 reload() {
 	doconn -r
 }
@@ -54,9 +70,63 @@ restart() {
 	start
 }
 
+stop_pre() {
+	# Stop the watchdog before tearing down the VPN
+	if [ -x "$WATCHDOG" ]
+	then
+		export CONFIGDIR="$CONFIGDIR"
+		export CONFIG="$CONFIG"
+		"$WATCHDOG" stop 2>/dev/null
+	fi
+}
+
 stop() {
 	(
 		source "$CONFIG"
 		ip link del "${PIA_INTERFACE:-pia}"
 	);
+}
+
+###############################################################################
+# Watchdog sub-commands (available as: rc-service net.pia watchdog_*)
+###############################################################################
+
+watchdog_start() {
+	if [ -x "$WATCHDOG" ]
+	then
+		ebegin "Starting PIA watchdog"
+		export CONFIGDIR="$CONFIGDIR"
+		export CONFIG="$CONFIG"
+		"$WATCHDOG" start
+		eend $?
+	else
+		eerror "Watchdog script not found at $WATCHDOG"
+		return 1
+	fi
+}
+
+watchdog_stop() {
+	if [ -x "$WATCHDOG" ]
+	then
+		ebegin "Stopping PIA watchdog"
+		export CONFIGDIR="$CONFIGDIR"
+		export CONFIG="$CONFIG"
+		"$WATCHDOG" stop
+		eend $?
+	else
+		eerror "Watchdog script not found at $WATCHDOG"
+		return 1
+	fi
+}
+
+watchdog_status() {
+	if [ -x "$WATCHDOG" ]
+	then
+		export CONFIGDIR="$CONFIGDIR"
+		export CONFIG="$CONFIG"
+		"$WATCHDOG" status
+	else
+		eerror "Watchdog script not found at $WATCHDOG"
+		return 1
+	fi
 }

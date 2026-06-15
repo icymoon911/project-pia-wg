@@ -57,11 +57,57 @@ If you want to maintain your forwarded port, it should be called every ~5 minute
 
 These are utility scripts - `pia-check.sh` will ping the remote endpoint over the VPN link to ensure it's still working, and `pia-currentserver` will print the cached connection information for the current or most recent connection.
 
-### openrc-init-pia
+### pia-watchdog
+
+`./pia-watchdog.sh {start|stop|status|restart}`
+
+A background daemon that monitors the PIA WireGuard connection and automatically reconnects when a disconnection is detected.
+
+**Connectivity check** uses a three-stage approach: interface existence, WireGuard handshake recency, and ping through the VPN to the server's VIP address. A disconnection is only declared after **3 consecutive** failed checks (configurable via `WATCHDOG_THRESHOLD`), so transient network jitter won't trigger unnecessary reconnects.
+
+**Reconnection strategy** (per attempt):
+1. **Fast reconnect** (`pia-wg.sh -f`): reuse cached server, skip serverlist fetch
+2. **Normal reconnect** (`pia-wg.sh`): re-register key with same server
+3. **Full reconnect** (`pia-wg.sh -r`): clear cache, may hop to a new server
+
+Each reconnect attempt is capped at **5 retries** (configurable via `WATCHDOG_MAX_RETRY`) with a 10-second delay between retries. If all retries are exhausted, the watchdog stops and logs a message requiring manual intervention.
+
+If `PORTFORWARD` is set in your config, port forwarding is automatically re-established after every successful reconnect, and is also periodically refreshed while the connection is healthy (every 10 minutes by default).
+
+**Configuration** (set in `pia-wg.conf` or environment):
+
+| Variable | Default | Description |
+|---|---|---|
+| `WATCHDOG_INTERVAL` | 30 | Seconds between connectivity checks |
+| `WATCHDOG_THRESHOLD` | 3 | Consecutive failures before reconnect |
+| `WATCHDOG_MAX_RETRY` | 5 | Max reconnect attempts before giving up |
+| `WATCHDOG_RETRY_DELAY` | 10 | Seconds between reconnect attempts |
+| `PF_REFRESH_INTERVAL` | 600 | Seconds between portforward refreshes |
+| `WATCHDOG_LOG` | (auto) | Log file path (default: `/var/log/pia-wg-watchdog.log` as root) |
+
+**Logs** are written with timestamps, disconnect reasons, reconnect stages, and results. Example:
+```
+[2026-06-15 03:42:17] CHECK FAILED (3/3): Ping to 10.0.0.1 via pia failed (3 packets)
+[2026-06-15 03:42:17] DISCONNECTED: 3 consecutive failures reached
+[2026-06-15 03:42:17] RECONNECT: attempt 1/5
+[2026-06-15 03:42:17] STAGE 1: Fast reconnect with -f (same server, cached link)
+[2026-06-15 03:42:25] RECONNECT SUCCESS: Fast reconnect succeeded
+[2026-06-15 03:42:25] PORTFORWARD: Re-establishing port forward
+[2026-06-15 03:42:26] PORTFORWARD: Successfully re-established
+```
+
+### openrc-init-pia (net.pia)
 
 This is an example openrc init script to start a PIA vpn connection during boot.
 
 It assigns the "reload" action to hop servers, demonstrating the ability to reuse a cached connection on boot but optionally hop servers at any time.
+
+The watchdog daemon is **automatically started** after a successful VPN connection and **stopped** before the VPN is torn down. You can also manage it independently:
+```sh
+rc-service net.pia watchdog_start    # start watchdog manually
+rc-service net.pia watchdog_stop     # stop watchdog manually
+rc-service net.pia watchdog_status   # check watchdog status
+```
 
 ### pia-config.sh
 
